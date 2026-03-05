@@ -1,7 +1,7 @@
 import os
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, Tuple
 
 import pandas as pd
 
@@ -11,7 +11,7 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class Settings:
-    input_file: str = "data_raw.csv"
+    input_file: str = r"C:\Users\CameronWise\Downloads\CommunityEngagement-main\CommunityEngagement-main\data.csv"
 
     master_out: str = "community_engagement_v2_MASTER.csv"
     city_year_out: str = "community_engagement_v2_CITY_YEAR_TOTALS.csv"
@@ -78,6 +78,27 @@ def clean_text_basic(value) -> str:
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
+def clean_dataframe_strings(df: pd.DataFrame, skip_cols=None) -> pd.DataFrame:
+    """
+    Apply clean_text_basic to every string column in the dataframe once.
+    Args:
+        df: The DataFrame to clean.
+        skip_cols: An optional iterable of column names to skip from cleaning.
+    Returns:
+        The DataFrame with all string columns cleaned, except those in skip_cols.
+    """
+    if skip_cols is None:
+        skip_cols = []
+
+    str_cols = [
+        c for c in df.columns
+        if df[c].dtype == "object" and c not in skip_cols
+    ]
+
+    df[str_cols] = df[str_cols].applymap(clean_text_basic)
+
+    return df
+
 
 def clean_city(value) -> str:
     """
@@ -134,7 +155,6 @@ def strip_legal_suffix(name, legal_suffixes: Iterable[str]) -> str:
     Returns:
         The cleaned organization name with legal suffixes removed.
     """
-    name = clean_text_basic(name)
     if not name:
         return ""
     words = [w for w in name.split() if w not in set(legal_suffixes)]
@@ -211,8 +231,6 @@ def load_optional_map(path: str, key_col: str, val_col: str) -> Dict[str, str]:
             print(f"WARNING: {path} missing columns {key_col}/{val_col}. Skipping.")
             return {}
 
-        dfm[k] = dfm[k].apply(clean_text_basic)
-        dfm[v] = dfm[v].apply(clean_text_basic)
         dfm = dfm[dfm[k] != ""]
 
         return dict(zip(dfm[k], dfm[v]))
@@ -280,7 +298,15 @@ def add_city_fields(df: pd.DataFrame, city_alias_map: Dict[str, str]) -> pd.Data
     Returns:
         DataFrame with added "City Clean" and "City Canonical" columns.
     """
-    df["City Clean"] = df["City"].apply(clean_city)
+
+    # If you've already cleaned strings globally, City is already clean.
+    # But we can still be defensive:
+    if "City" not in df.columns:
+        raise KeyError("Missing required column: City")
+
+    if "City Clean" not in df.columns:
+        df["City Clean"] = df["City"].map(clean_city)
+
     df["City Canonical"] = df["City Clean"].map(city_alias_map).fillna(df["City Clean"])
     return df
 
@@ -301,22 +327,30 @@ def add_org_fields(
     Returns:
         DataFrame with added "Org Clean", "Canonical Org Clean", "Reporting Org Name", and "Reporting Org Clean" columns.
     """
-    df["Org Clean"] = df["Organization Name"].apply(clean_text_basic)
 
+    if "Organization Name" not in df.columns:
+        raise KeyError("Missing required column: Organization Name")
+
+    # Create Org Clean if it doesn't exist (works whether or not you pre-cleaned df)
+    if "Org Clean" not in df.columns:
+        df["Org Clean"] = df["Organization Name"].map(clean_text_basic)
+
+    # Apply alias mapping
     df["Canonical Org Clean"] = df["Org Clean"].map(alias_map).fillna(df["Org Clean"])
-    df["Canonical Org Clean"] = df["Canonical Org Clean"].apply(
+    df["Canonical Org Clean"] = df["Canonical Org Clean"].map(
         lambda s: strip_legal_suffix(s, legal_suffixes)
     )
 
+    # Apply grouping (canonical -> reporting)
     df["Reporting Org Name"] = df["Canonical Org Clean"]
     if group_map:
         df["Reporting Org Name"] = df["Canonical Org Clean"].map(group_map).fillna(df["Reporting Org Name"])
 
-    df["Reporting Org Name"] = df["Reporting Org Name"].apply(
+    df["Reporting Org Name"] = df["Reporting Org Name"].map(
         lambda s: strip_legal_suffix(s, legal_suffixes)
     )
-    df["Reporting Org Clean"] = df["Reporting Org Name"].apply(clean_text_basic)
 
+    df["Reporting Org Clean"] = df["Reporting Org Name"].map(clean_text_basic)
     return df
 
 
@@ -328,7 +362,6 @@ def add_contact_fields(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with added "Contact Clean" and "Email Domain" columns.
     """
-    df["Contact Clean"] = df["Contact Name"].apply(clean_text_basic)
     df["Email Domain"] = df["Contact Info"].apply(extract_email_domain)
     return df
 
@@ -499,14 +532,15 @@ def build_month_org_city(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
 
-    out["First Contact Date"] = out["First_Contact_Date"].apply(format_date_dmy)
-    out = out.drop(columns=["First_Contact_Date"])
+    # out = out.drop(columns=["First_Contact_Date"])
 
     out = out.rename(columns={
         "YearMonth": "Month",
         "City Canonical": "City",
         "Reporting Org Name": "Organization",
         "First_Contacts": "First Contacts (Count)",
+        "First_Contact_Date": "First Contact Date",
+
     })
 
     out = out[["Month", "City", "Organization", "First Contacts (Count)", "First Contact Date"]]
@@ -536,6 +570,11 @@ def run_pipeline(settings: Settings) -> None:
     """
     raw = load_raw(settings)
     df = select_columns(raw, settings.desired_cols)
+
+    df = clean_dataframe_strings(
+        df,
+        skip_cols=["Organization Type"]   # keep raw if needed
+    )
 
     df = add_date_fields(df)
     df = add_city_fields(df, settings.city_alias_map)
